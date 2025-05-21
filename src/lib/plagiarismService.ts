@@ -1,4 +1,3 @@
-
 /**
  * Service for checking plagiarism against Wikipedia and other sources
  */
@@ -51,7 +50,7 @@ export const checkPlagiarism = async (text: string): Promise<PlagiarismResult> =
       .filter((result, index, self) => 
         index === self.findIndex(r => r.pageid === result.pageid)
       )
-      .slice(0, 5); // Limit to 5 top results for efficiency
+      .slice(0, 8); // Increased from 5 to 8 for better coverage
     
     console.log(`Found ${flatResults.length} potential Wikipedia articles`);
     
@@ -66,15 +65,21 @@ export const checkPlagiarism = async (text: string): Promise<PlagiarismResult> =
     articleContents.forEach(article => {
       if (!article || !article.extract) return;
       
-      const similarityResult = findSimilarities(text, article.extract);
+      // Enhanced analysis by checking the full text against each article
+      const similarityResults = findAllSimilarities(text, article.extract);
       
-      if (similarityResult.similarity > 10) { // Only include if at least 10% similar
-        matches.push({
-          source: article.title,
-          similarity: similarityResult.similarity,
-          matchedText: similarityResult.matchedText,
-          sourceText: article.extract.substring(0, 200) + "...",
-          sourceUrl: `https://en.wikipedia.org/wiki/${article.title.replace(/ /g, '_')}`
+      if (similarityResults.overallSimilarity > 10) { // Only include if at least 10% similar
+        similarityResults.matches.forEach(match => {
+          matches.push({
+            source: article.title,
+            similarity: match.similarity,
+            matchedText: match.matchedText,
+            sourceText: article.extract.substring(
+              Math.max(0, match.sourceIndex - 50),
+              Math.min(article.extract.length, match.sourceIndex + match.matchedText.length + 50)
+            ),
+            sourceUrl: `https://en.wikipedia.org/wiki/${article.title.replace(/ /g, '_')}`
+          });
         });
       }
     });
@@ -104,23 +109,42 @@ export const checkPlagiarism = async (text: string): Promise<PlagiarismResult> =
  * Extract key search terms from the text
  */
 const extractSearchTerms = (text: string): string[] => {
-  // Get unique sentences and phrases
+  // Get unique sentences and chunks of the text
   const sentences = text
     .split(/[.!?]+/)
     .map(s => s.trim())
     .filter(s => s.length > 15 && s.split(' ').length > 5);
   
-  // If we have a long text, extract smaller chunks to search
-  if (sentences.length > 3) {
-    // Choose a representative sample of sentences
-    return [
+  // For more thorough analysis, extract more chunks
+  if (sentences.length > 5) {
+    // Take samples throughout the text for better coverage
+    const sampledSentences = [
       sentences[0], 
-      sentences[Math.floor(sentences.length / 2)],
+      sentences[Math.floor(sentences.length * 0.25)],
+      sentences[Math.floor(sentences.length * 0.5)],
+      sentences[Math.floor(sentences.length * 0.75)],
       sentences[sentences.length - 1]
+    ];
+    
+    return sampledSentences.filter((s, i, arr) => 
+      // Filter out duplicates
+      arr.indexOf(s) === i
+    );
+  } else if (sentences.length > 0) {
+    return sentences;
+  }
+  
+  // If text doesn't have complete sentences, chunk it
+  const textLength = text.length;
+  if (textLength > 200) {
+    return [
+      text.substring(0, 100),
+      text.substring(textLength / 2 - 50, textLength / 2 + 50),
+      text.substring(textLength - 100)
     ];
   }
   
-  return sentences.length > 0 ? sentences : [text.substring(0, 100)];
+  return [text];
 };
 
 /**
@@ -177,9 +201,13 @@ const getWikipediaContent = async (pageId: number, title: string): Promise<WikiE
 };
 
 /**
- * Find similarities between the original text and a potential source
+ * Find all similarities between the original text and a potential source
+ * Returns multiple matches with their locations
  */
-const findSimilarities = (originalText: string, sourceText: string): { similarity: number, matchedText: string } => {
+const findAllSimilarities = (originalText: string, sourceText: string): { 
+  overallSimilarity: number, 
+  matches: Array<{similarity: number, matchedText: string, originalIndex: number, sourceIndex: number}>
+} => {
   // Normalize texts for comparison
   const normalizeText = (text: string) => {
     return text.toLowerCase()
@@ -191,75 +219,95 @@ const findSimilarities = (originalText: string, sourceText: string): { similarit
   const normalizedOriginal = normalizeText(originalText);
   const normalizedSource = normalizeText(sourceText);
   
-  // Look for matching phrases (at least 5 words long)
   const originalWords = normalizedOriginal.split(' ');
   const sourceWords = normalizedSource.split(' ');
   
-  let longestMatch = '';
-  let matchPosition = -1;
+  const matches = [];
+  const coveredRanges = [];
   
-  // Sliding window approach to find matching phrases
-  for (let windowSize = 10; windowSize >= 5; windowSize--) {
-    if (longestMatch.length > 0) break;
-    
+  // Find significant matches with length >= 4 words
+  for (let windowSize = Math.min(15, originalWords.length); windowSize >= 4; windowSize--) {
     for (let i = 0; i <= originalWords.length - windowSize; i++) {
+      // Skip if this range is already covered by a previous match
+      if (coveredRanges.some(range => i >= range.start && i <= range.end)) continue;
+      
       const phrase = originalWords.slice(i, i + windowSize).join(' ');
-      if (normalizedSource.includes(phrase)) {
-        longestMatch = phrase;
-        matchPosition = i;
-        break;
+      const sourceIndex = normalizedSource.indexOf(phrase);
+      
+      if (sourceIndex >= 0) {
+        // Found a match, try to extend it
+        let extendedMatch = phrase;
+        let originalEnd = i + windowSize;
+        let sourceEnd = sourceIndex + phrase.length;
+        
+        // Extend forward
+        while (originalEnd < originalWords.length &&
+               sourceEnd < normalizedSource.length &&
+               originalWords[originalEnd] === sourceWords[sourceEnd]) {
+          extendedMatch += ' ' + originalWords[originalEnd];
+          originalEnd++;
+          sourceEnd++;
+        }
+        
+        // Calculate match details
+        const matchLength = extendedMatch.split(' ').length;
+        const similarityScore = (matchLength / originalWords.length) * 100;
+        
+        // Find the actual text in the original (preserving case)
+        const originalPhraseIndex = originalText.toLowerCase().indexOf(extendedMatch.toLowerCase());
+        let actualMatchedText = '';
+        if (originalPhraseIndex >= 0) {
+          actualMatchedText = originalText.substring(
+            originalPhraseIndex,
+            originalPhraseIndex + extendedMatch.length + 20
+          );
+        } else {
+          actualMatchedText = extendedMatch;
+        }
+        
+        // Add to matches if significant enough (adjust threshold as needed)
+        if (similarityScore > 5) {
+          matches.push({
+            similarity: similarityScore,
+            matchedText: actualMatchedText,
+            originalIndex: originalPhraseIndex,
+            sourceIndex
+          });
+          
+          // Mark this range as covered
+          coveredRanges.push({
+            start: i,
+            end: originalEnd - 1
+          });
+        }
       }
     }
   }
   
-  // If we found a significant match, extend it as far as possible
-  let extendedMatch = longestMatch;
+  // Calculate combined similarity
+  const totalCoverage = coveredRanges.reduce((total, range) => {
+    return total + (range.end - range.start + 1);
+  }, 0);
   
-  if (matchPosition >= 0) {
-    // Try to extend the match forward
-    let forwardPos = matchPosition + extendedMatch.split(' ').length;
-    let sourcePos = normalizedSource.indexOf(extendedMatch) + extendedMatch.length;
-    
-    while (forwardPos < originalWords.length && 
-           sourcePos < normalizedSource.length && 
-           originalWords[forwardPos].toLowerCase() === normalizedSource.substring(sourcePos, sourcePos + originalWords[forwardPos].length).toLowerCase()) {
-      extendedMatch += ' ' + originalWords[forwardPos];
-      forwardPos++;
-      sourcePos += originalWords[forwardPos-1].length + 1;
-    }
-    
-    // Try to extend the match backward
-    let backwardPos = matchPosition - 1;
-    let sourceStartPos = normalizedSource.indexOf(longestMatch) - 1;
-    
-    while (backwardPos >= 0 && 
-           sourceStartPos >= 0 && 
-           originalWords[backwardPos].toLowerCase() === normalizedSource.substring(sourceStartPos - originalWords[backwardPos].length, sourceStartPos).toLowerCase()) {
-      extendedMatch = originalWords[backwardPos] + ' ' + extendedMatch;
-      backwardPos--;
-      sourceStartPos -= originalWords[backwardPos+1].length + 1;
-    }
-  }
-  
-  // Calculate similarity percentage
-  const similarity = extendedMatch.length > 0 
-    ? (extendedMatch.split(' ').length / originalWords.length) * 100
-    : 0;
-  
-  // Get the actual matched text from the original (preserving case, etc.)
-  let matchedText = "";
-  if (matchPosition >= 0) {
-    const startIndex = originalText.toLowerCase().indexOf(extendedMatch.toLowerCase());
-    if (startIndex >= 0) {
-      matchedText = originalText.substring(startIndex, startIndex + extendedMatch.length + 20);
-    } else {
-      matchedText = extendedMatch; // Fallback
-    }
-  }
+  const overallSimilarity = Math.min(
+    (totalCoverage / originalWords.length) * 100,
+    100
+  );
   
   return {
-    similarity: Math.min(similarity, 100), // Cap at 100%
-    matchedText: matchedText || extendedMatch
+    overallSimilarity,
+    matches: matches.sort((a, b) => b.similarity - a.similarity)
+  };
+};
+
+/**
+ * Legacy function - keep for backwards compatibility
+ */
+const findSimilarities = (originalText: string, sourceText: string): { similarity: number, matchedText: string } => {
+  const results = findAllSimilarities(originalText, sourceText);
+  return {
+    similarity: results.overallSimilarity,
+    matchedText: results.matches.length > 0 ? results.matches[0].matchedText : ""
   };
 };
 
@@ -269,12 +317,12 @@ const findSimilarities = (originalText: string, sourceText: string): { similarit
 const calculateOverallSimilarity = (matches: PlagiarismMatch[]): number => {
   if (matches.length === 0) return 0;
   
-  // Weight by the strength of each match
+  // Weight by the strength of each match and consider the number of matches
   const totalSimilarity = matches.reduce((sum, match) => sum + match.similarity, 0);
   
-  // Calculate weighted average, but cap to ensure we don't exceed 100%
+  // Calculate weighted average with diminishing returns for many small matches
   return Math.min(
-    Math.sqrt(totalSimilarity * matches.length) * 0.8, 
+    Math.sqrt(totalSimilarity * Math.min(matches.length, 5)) * 0.8, 
     100
   );
 };
