@@ -1,6 +1,11 @@
-const { app, BrowserWindow } = require('electron');
-const path = require('path');
-const url = require('url');
+import { app, BrowserWindow } from 'electron';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { URL } from 'url';
+
+// Get the directory name in ES module
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Keep a global reference of the window object
 let mainWindow;
@@ -19,11 +24,7 @@ function createWindow() {
 
   // In production, load the built app
   // In development, connect to the dev server
-  const startUrl = process.env.ELECTRON_START_URL || url.format({
-    pathname: path.join(__dirname, '../dist/index.html'),
-    protocol: 'file:',
-    slashes: true
-  });
+  const startUrl = process.env.ELECTRON_START_URL || new URL(`file://${path.join(__dirname, '../dist/index.html')}`).href;
   
   mainWindow.loadURL(startUrl);
 
