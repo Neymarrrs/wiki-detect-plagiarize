@@ -1,7 +1,6 @@
 import { app, BrowserWindow } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { URL } from 'url';
 
 // Get the directory name in ES module
 const __filename = fileURLToPath(import.meta.url);
@@ -24,7 +23,8 @@ function createWindow() {
 
   // In production, load the built app
   // In development, connect to the dev server
-  const startUrl = process.env.ELECTRON_START_URL || new URL(`file://${path.join(__dirname, '../dist/index.html')}`).href;
+  const startUrl = process.env.ELECTRON_START_URL || 
+                   `file://${path.join(__dirname, '../dist/index.html')}`;
   
   mainWindow.loadURL(startUrl);
 
